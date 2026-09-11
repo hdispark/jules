@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import sys
 import time
 
-def fetch_drought_data(date_str, retries=3):
+def fetch_drought_data(date_str, retries=5):
     url = "https://hydro.kma.go.kr/selectDrghtAdmCntPop.do"
     data = urllib.parse.urlencode({
         "search_dt": date_str,
@@ -21,11 +21,14 @@ def fetch_drought_data(date_str, retries=3):
                 return json.loads(res).get("dataList", [])
         except Exception as e:
             if attempt == retries - 1:
-                print(f"\nError fetching data for {date_str}: {e}")
-                return []
+                print(f"\n[오류] API 호출 실패 (날짜: {date_str}): {e}")
+                sys.exit(1) # Stop execution rather than corrupting data
             time.sleep(1)
 
 def get_drought_regions(data):
+    if not data:
+        return {}
+
     drought_map = {
         "CASE_3": "약한가뭄",
         "CASE_4": "보통가뭄",
@@ -49,6 +52,15 @@ def get_drought_regions(data):
                     regions[region_key] = drought_map[kind]
     return regions
 
+def get_emoji(level):
+    return {
+        "정상": "⚪",
+        "약한가뭄": "🟢",
+        "보통가뭄": "🟡",
+        "심한가뭄": "🟠",
+        "극심한가뭄": "🔴"
+    }.get(level, "❓")
+
 def main():
     target_date = datetime(2026, 9, 10)
 
@@ -70,6 +82,9 @@ def main():
         check_date = target_date - timedelta(days=days_backward)
 
         data = fetch_drought_data(check_date.strftime("%Y%m%d"))
+        # Add a small delay to prevent rate-limiting
+        time.sleep(0.1)
+
         drought_regions_on_date = get_drought_regions(data)
 
         ended_regions = []
@@ -88,9 +103,11 @@ def main():
         if days_backward >= 365:
             break
 
-    print("\n")
+    print("\n데이터 수집 완료. 보고서를 생성합니다...\n")
 
     periods = {}
+    level_counts = {"약한가뭄": 0, "보통가뭄": 0, "심한가뭄": 0, "극심한가뭄": 0}
+
     for region, hist in history.items():
         hist.reverse() # oldest to newest
         region_periods = []
@@ -109,30 +126,55 @@ def main():
         end_date = hist[-1][0]
         region_periods.append((start_date, end_date, current_level))
 
+        curr_lv = initial_regions[region]
+        level_counts[curr_lv] += 1
+
         periods[region] = {
             "total_days": len(hist),
             "periods": region_periods,
-            "current_level": initial_regions[region]
+            "current_level": curr_lv
         }
 
-    # Generate Report
+    # Generate Report based on proposed structure
     with open('report.txt', 'w') as f:
         f.write("==========================================================\n")
-        f.write(" 2026년 9월 10일 기준 기상가뭄 심층 분석 보고서\n")
+        f.write(" 💡 기상가뭄 현황 심층 분석 보고서 \n")
+        f.write(f" (기준일: {target_date.strftime('%Y년 %m월 %d일')})\n")
         f.write("==========================================================\n\n")
 
-        f.write("1. [요약] 전국 기상가뭄 개황\n")
+        # 1. Executive Summary
+        f.write("1. [핵심 요약] Executive Summary\n")
         f.write("-" * 58 + "\n")
-        f.write(f" - 총 가뭄 발생 시군구: {len(initial_regions)}개 지역\n")
+        f.write(f" ▶ 전국 가뭄 위기 경보 수준: 총 {len(initial_regions)}개 시군구에서 가뭄 발생 중.\n")
+
+        # Find some key insights
+        severe_count = level_counts["심한가뭄"] + level_counts["극심한가뭄"]
+        if severe_count > 0:
+            f.write(f" ▶ 주요 이슈: '심한가뭄' 이상 단계 지역이 {severe_count}곳 존재하여 집중 관리가 필요합니다.\n")
+
+        long_term_count = sum(1 for d in periods.values() if d["total_days"] >= 30)
+        f.write(f" ▶ 지속성 우려: 30일 이상 장기 가뭄이 지속되는 지역이 {long_term_count}곳에 달합니다.\n\n")
 
         sorted_by_duration = sorted(periods.items(), key=lambda x: -x[1]["total_days"])
-        top_regions = sorted_by_duration[:5]
-        f.write(" - 최장기 가뭄 지속 지역 (Top 5):\n")
-        for r_name, r_data in top_regions:
-            f.write(f"   * {r_name}: {r_data['total_days']}일\n")
+        f.write(" ▶ 최우선 모니터링 대상 (최장기 지속 Top 5):\n")
+        for r_name, r_data in sorted_by_duration[:5]:
+            lv_emoji = get_emoji(r_data["current_level"])
+            f.write(f"   * {r_name} {lv_emoji} (현재 {r_data['current_level']}, {r_data['total_days']}일 지속)\n")
         f.write("\n")
 
-        f.write("2. [지역별 현황] 시도별 가뭄 지속일 요약\n")
+        # 2. Severity Distribution
+        f.write("2. [분포 현황] 가뭄 단계별 비중\n")
+        f.write("-" * 58 + "\n")
+        total = len(initial_regions)
+        for lv in ["극심한가뭄", "심한가뭄", "보통가뭄", "약한가뭄"]:
+            count = level_counts[lv]
+            if count > 0:
+                pct = (count / total) * 100
+                f.write(f" {get_emoji(lv)} {lv}: {count}곳 ({pct:.1f}%)\n")
+        f.write("\n")
+
+        # 3. Regional Trend (Provincial)
+        f.write("3. [권역별 현황] 가뭄 집중도 및 지속 시간\n")
         f.write("-" * 58 + "\n")
         by_province = {}
         for r_name, r_data in periods.items():
@@ -143,52 +185,53 @@ def main():
 
         for prov in sorted(by_province.keys(), key=lambda x: -len(by_province[x])):
             cities = by_province[prov]
-            f.write(f" [ {prov} ] - {len(cities)}개 시군구\n")
-            cities_sorted = sorted(cities, key=lambda x: -x[1]["total_days"])
             avg_days = sum(c[1]["total_days"] for c in cities) / len(cities)
-            max_city = cities_sorted[0]
-            f.write(f"  * 평균 지속일: {avg_days:.1f}일 | 최장 지속일: {max_city[0]} ({max_city[1]['total_days']}일)\n")
+            max_city = sorted(cities, key=lambda x: -x[1]["total_days"])[0]
+            f.write(f" 📍 [ {prov} ] : 총 {len(cities)}개 시군구 발생\n")
+            f.write(f"    - 평균 지속기간: {avg_days:.1f}일\n")
+            f.write(f"    - 최장기 지역: {max_city[0]} ({max_city[1]['total_days']}일 지속)\n")
         f.write("\n")
 
-        f.write("3. [상세 보고서] 시군구별 가뭄 지속일 및 단계 변화 이력\n")
+        # 4. Detailed Monitor List
+        f.write("4. [상세 부록] 시군구별 가뭄 지속일 및 타임라인\n")
         f.write("-" * 58 + "\n")
+        f.write(" * 범례: 🟢약한가뭄 🟡보통가뭄 🟠심한가뭄 🔴극심한가뭄 (타임라인은 1글자=2일, 과거→현재 순)\n\n")
         for prov in sorted(by_province.keys(), key=lambda x: -len(by_province[x])):
             cities = by_province[prov]
             cities_sorted = sorted(cities, key=lambda x: -x[1]["total_days"])
-            f.write(f"\n▶ {prov}\n")
+            f.write(f"▣ {prov}\n")
             for city, r_data in cities_sorted:
                 total = r_data["total_days"]
                 curr_lv = r_data["current_level"]
-                f.write(f"  ■ {city}: 총 {total}일 지속 (현재: {curr_lv})\n")
+                f.write(f"  ■ {city}: 총 {total}일 지속 (현재: {get_emoji(curr_lv)} {curr_lv})\n")
 
-                # Simple text-based visualization (timeline)
-                # We'll map levels to characters
+                # Visual timeline
                 char_map = {
-                    "정상": ".",
-                    "약한가뭄": "░",
-                    "보통가뭄": "▒",
-                    "심한가뭄": "▓",
-                    "극심한가뭄": "█"
+                    "약한가뭄": "🟢",
+                    "보통가뭄": "🟡",
+                    "심한가뭄": "🟠",
+                    "극심한가뭄": "🔴"
                 }
 
                 timeline_chars = ""
                 for p_start, p_end, p_level in r_data["periods"]: # oldest to newest
                     days = (p_end - p_start).days + 1
-                    char = char_map.get(p_level, "?")
-                    # Scale: 1 character = 2 days (to keep lines from getting too long)
+                    char = char_map.get(p_level, "⚪")
+                    # Scale: 1 character = 2 days
                     scaled_length = max(1, days // 2)
                     timeline_chars += char * scaled_length
 
-                f.write(f"    [시각화: 과거-->현재] {timeline_chars} (기호: ░=약, ▒=보, ▓=심, █=극심)\n")
+                f.write(f"    [시각화] {timeline_chars}\n")
 
-                # Print periods in reverse (newest to oldest) for better readability
                 reversed_periods = r_data["periods"][::-1]
                 for p_start, p_end, p_level in reversed_periods:
                     days = (p_end - p_start).days + 1
                     start_str = p_start.strftime("%Y-%m-%d")
                     end_str = p_end.strftime("%Y-%m-%d")
                     f.write(f"    - {start_str} ~ {end_str} ({days:2d}일): {p_level}\n")
-    print("보고서 작성이 완료되어 report.txt 에 저장되었습니다.")
+            f.write("\n")
+
+    print("보고서 생성이 완료되었습니다: report.txt")
 
 if __name__ == "__main__":
     main()
