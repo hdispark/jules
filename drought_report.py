@@ -21,8 +21,8 @@ def fetch_drought_data(date_str, retries=5):
                 return json.loads(res).get("dataList", [])
         except Exception as e:
             if attempt == retries - 1:
-                print(f"\n[오류] API 호출 실패 (날짜: {date_str}): {e}")
-                sys.exit(1) # Stop execution rather than corrupting data
+                print(f"Error fetching {date_str}: {e}")
+                return []
             time.sleep(1)
 
 def get_drought_regions(data):
@@ -61,31 +61,63 @@ def get_emoji(level):
         "극심한가뭄": "🔴"
     }.get(level, "❓")
 
+severity_order = {"정상": 0, "약한가뭄": 1, "보통가뭄": 2, "심한가뭄": 3, "극심한가뭄": 4}
+
+def compare_regions(old, new):
+    new_regions = set(new.keys()) - set(old.keys())
+    released = set(old.keys()) - set(new.keys())
+    worsened = []
+    improved = []
+    same = []
+    for r in set(old.keys()) & set(new.keys()):
+        old_sev = severity_order[old[r]]
+        new_sev = severity_order[new[r]]
+        if new_sev > old_sev:
+            worsened.append(r)
+        elif new_sev < old_sev:
+            improved.append(r)
+        else:
+            same.append(r)
+    return new_regions, released, worsened, improved, same
+
 def main():
-    target_date = datetime(2026, 9, 10)
+    target_str = "2026-09-14"
+    target_date = datetime.strptime(target_str, "%Y-%m-%d")
 
-    print(f"보고서 생성을 위한 데이터를 수집 중입니다. 기준일: {target_date.strftime('%Y-%m-%d')}...")
+    print(f"Fetching data for {target_str}...")
 
-    initial_data = fetch_drought_data(target_date.strftime("%Y%m%d"))
-    initial_regions = get_drought_regions(initial_data)
+    dates_to_fetch = {
+        "today": target_date,
+        "yesterday": target_date - timedelta(days=1),
+        "7days": target_date - timedelta(days=7),
+        "30days": target_date - timedelta(days=30)
+    }
 
-    if not initial_regions:
-        print("현재 기상가뭄이 발생하고 있는 지역이 없습니다.")
-        return
+    data_by_period = {}
+    for key, dt in dates_to_fetch.items():
+        dt_str = dt.strftime("%Y%m%d")
+        data = fetch_drought_data(dt_str)
+        data_by_period[key] = get_drought_regions(data)
+        time.sleep(0.5)
 
-    history = {region: [(target_date, initial_regions[region])] for region in initial_regions.keys()}
-    current_active = set(initial_regions.keys())
+    # For duration tracking
+    current_active = set(data_by_period["today"].keys())
+    history = {region: [(target_date, data_by_period["today"][region])] for region in current_active}
 
     days_backward = 0
     while current_active:
         days_backward += 1
         check_date = target_date - timedelta(days=days_backward)
-
-        data = fetch_drought_data(check_date.strftime("%Y%m%d"))
-        # Add a small delay to prevent rate-limiting
-        time.sleep(0.1)
-
-        drought_regions_on_date = get_drought_regions(data)
+        if days_backward == 1:
+            drought_regions_on_date = data_by_period["yesterday"]
+        elif days_backward == 7:
+            drought_regions_on_date = data_by_period["7days"]
+        elif days_backward == 30:
+            drought_regions_on_date = data_by_period["30days"]
+        else:
+            data = fetch_drought_data(check_date.strftime("%Y%m%d"))
+            drought_regions_on_date = get_drought_regions(data)
+            time.sleep(0.1)
 
         ended_regions = []
         for region in current_active:
@@ -97,141 +129,126 @@ def main():
         for region in ended_regions:
             current_active.remove(region)
 
-        sys.stdout.write(f"\r추적 중: {check_date.strftime('%Y-%m-%d')} (남은 대상: {len(current_active)}개)")
-        sys.stdout.flush()
-
         if days_backward >= 365:
             break
 
-    print("\n데이터 수집 완료. 보고서를 생성합니다...\n")
-
-    periods = {}
-    level_counts = {"약한가뭄": 0, "보통가뭄": 0, "심한가뭄": 0, "극심한가뭄": 0}
-
+    # Calculate durations
+    durations = {}
     for region, hist in history.items():
-        hist.reverse() # oldest to newest
-        region_periods = []
+        durations[region] = len(hist)
 
-        current_level = hist[0][1]
-        start_date = hist[0][0]
+    # 1페이지 요약
+    today_regions = data_by_period["today"]
+    yest_regions = data_by_period["yesterday"]
 
-        for i in range(1, len(hist)):
-            date, level = hist[i]
-            if level != current_level:
-                end_date = hist[i-1][0]
-                region_periods.append((start_date, end_date, current_level))
-                start_date = date
-                current_level = level
+    today_counts = {"약한가뭄": 0, "보통가뭄": 0, "심한가뭄": 0, "극심한가뭄": 0}
+    for r, lvl in today_regions.items():
+        today_counts[lvl] += 1
 
-        end_date = hist[-1][0]
-        region_periods.append((start_date, end_date, current_level))
+    yest_counts = {"약한가뭄": 0, "보통가뭄": 0, "심한가뭄": 0, "극심한가뭄": 0}
+    for r, lvl in yest_regions.items():
+        yest_counts[lvl] += 1
 
-        curr_lv = initial_regions[region]
-        level_counts[curr_lv] += 1
+    new_regions, released, worsened, improved, same = compare_regions(yest_regions, today_regions)
 
-        periods[region] = {
-            "total_days": len(hist),
-            "periods": region_periods,
-            "current_level": curr_lv
-        }
+    report = []
+    report.append("==========================================================")
+    report.append(f" 기상가뭄 현황 및 변화 경향 보고서 ({target_date.strftime('%Y년 %m월 %d일')})")
+    report.append("==========================================================\n")
 
-    # Generate Report based on proposed structure
-    with open('report.txt', 'w') as f:
-        f.write("==========================================================\n")
-        f.write(" 💡 기상가뭄 현황 심층 분석 보고서 \n")
-        f.write(f" (기준일: {target_date.strftime('%Y년 %m월 %d일')})\n")
-        f.write("==========================================================\n\n")
+    report.append("[ 1페이지: 요약 ]\n")
+    report.append("■ 오늘 현황")
+    report.append(f" - 총 가뭄 발생 지역: {len(today_regions)}곳")
+    for lvl in ["극심한가뭄", "심한가뭄", "보통가뭄", "약한가뭄"]:
+        if today_counts[lvl] > 0:
+            report.append(f" - {lvl}: {today_counts[lvl]}곳")
 
-        # 1. Executive Summary
-        f.write("1. [핵심 요약] Executive Summary\n")
-        f.write("-" * 58 + "\n")
-        f.write(f" ▶ 전국 가뭄 위기 경보 수준: 총 {len(initial_regions)}개 시군구에서 가뭄 발생 중.\n")
+    report.append("\n■ 전일 대비 변화")
+    report.append(f" - 총 {len(today_regions) - len(yest_regions)}곳 증감")
+    if worsened:
+        report.append(f" - 악화된 지역: {len(worsened)}곳")
+    if improved:
+        report.append(f" - 호전된 지역: {len(improved)}곳")
 
-        # Find some key insights
-        severe_count = level_counts["심한가뭄"] + level_counts["극심한가뭄"]
-        if severe_count > 0:
-            f.write(f" ▶ 주요 이슈: '심한가뭄' 이상 단계 지역이 {severe_count}곳 존재하여 집중 관리가 필요합니다.\n")
+    report.append("\n■ 신규/해제")
+    report.append(f" - 신규 가뭄 발생 지역: {len(new_regions)}곳 " + (f"({', '.join(new_regions)})" if new_regions else ""))
+    report.append(f" - 가뭄 해제 지역: {len(released)}곳 " + (f"({', '.join(released)})" if released else ""))
 
-        long_term_count = sum(1 for d in periods.values() if d["total_days"] >= 30)
-        f.write(f" ▶ 지속성 우려: 30일 이상 장기 가뭄이 지속되는 지역이 {long_term_count}곳에 달합니다.\n\n")
+    report.append("\n■ 종합평가")
+    if len(today_regions) > len(yest_regions):
+        eval_txt = "전일 대비 가뭄 지역이 증가하여 주의가 필요합니다."
+    elif len(today_regions) < len(yest_regions):
+        eval_txt = "전일 대비 가뭄 지역이 감소하여 호전되는 추세입니다."
+    else:
+        eval_txt = "전일과 유사한 수준의 가뭄이 지속되고 있습니다."
 
-        sorted_by_duration = sorted(periods.items(), key=lambda x: -x[1]["total_days"])
-        f.write(" ▶ 최우선 모니터링 대상 (최장기 지속 Top 5):\n")
-        for r_name, r_data in sorted_by_duration[:5]:
-            lv_emoji = get_emoji(r_data["current_level"])
-            f.write(f"   * {r_name} {lv_emoji} (현재 {r_data['current_level']}, {r_data['total_days']}일 지속)\n")
-        f.write("\n")
+    if today_counts["극심한가뭄"] > 0 or today_counts["심한가뭄"] > 0:
+        eval_txt += f" 특히, 심한 가뭄 이상의 지역이 {today_counts['극심한가뭄'] + today_counts['심한가뭄']}곳 존재하여 집중 관리가 요구됩니다."
+    report.append(f" - {eval_txt}")
 
-        # 2. Severity Distribution
-        f.write("2. [분포 현황] 가뭄 단계별 비중\n")
-        f.write("-" * 58 + "\n")
-        total = len(initial_regions)
-        for lv in ["극심한가뭄", "심한가뭄", "보통가뭄", "약한가뭄"]:
-            count = level_counts[lv]
-            if count > 0:
-                pct = (count / total) * 100
-                f.write(f" {get_emoji(lv)} {lv}: {count}곳 ({pct:.1f}%)\n")
-        f.write("\n")
+    report.append("\n" + "="*58 + "\n")
 
-        # 3. Regional Trend (Provincial)
-        f.write("3. [권역별 현황] 가뭄 집중도 및 지속 시간\n")
-        f.write("-" * 58 + "\n")
-        by_province = {}
-        for r_name, r_data in periods.items():
-            prov, city = r_name.split(" ", 1)
-            if prov not in by_province:
-                by_province[prov] = []
-            by_province[prov].append((city, r_data))
+    report.append("[ 2페이지: 권역 분석 ]\n")
 
-        for prov in sorted(by_province.keys(), key=lambda x: -len(by_province[x])):
-            cities = by_province[prov]
-            avg_days = sum(c[1]["total_days"] for c in cities) / len(cities)
-            max_city = sorted(cities, key=lambda x: -x[1]["total_days"])[0]
-            f.write(f" 📍 [ {prov} ] : 총 {len(cities)}개 시군구 발생\n")
-            f.write(f"    - 평균 지속기간: {avg_days:.1f}일\n")
-            f.write(f"    - 최장기 지역: {max_city[0]} ({max_city[1]['total_days']}일 지속)\n")
-        f.write("\n")
+    def get_provincial_data(regions_dict):
+        prov = {}
+        for r, lvl in regions_dict.items():
+            p = r.split()[0]
+            if p not in prov:
+                prov[p] = 0
+            prov[p] += 1
+        return prov
 
-        # 4. Detailed Monitor List
-        f.write("4. [상세 부록] 시군구별 가뭄 지속일 및 타임라인\n")
-        f.write("-" * 58 + "\n")
-        f.write(" * 범례: 🟢약한가뭄 🟡보통가뭄 🟠심한가뭄 🔴극심한가뭄 (타임라인은 1글자=2일, 과거→현재 순)\n\n")
-        for prov in sorted(by_province.keys(), key=lambda x: -len(by_province[x])):
-            cities = by_province[prov]
-            cities_sorted = sorted(cities, key=lambda x: -x[1]["total_days"])
-            f.write(f"▣ {prov}\n")
-            for city, r_data in cities_sorted:
-                total = r_data["total_days"]
-                curr_lv = r_data["current_level"]
-                f.write(f"  ■ {city}: 총 {total}일 지속 (현재: {get_emoji(curr_lv)} {curr_lv})\n")
+    today_prov = get_provincial_data(today_regions)
+    yest_prov = get_provincial_data(yest_regions)
 
-                # Visual timeline
-                char_map = {
-                    "약한가뭄": "🟢",
-                    "보통가뭄": "🟡",
-                    "심한가뭄": "🟠",
-                    "극심한가뭄": "🔴"
-                }
+    report.append("■ 권역별 현황")
+    for p in sorted(today_prov.keys()):
+        report.append(f" - {p}: {today_prov[p]}곳")
 
-                timeline_chars = ""
-                for p_start, p_end, p_level in r_data["periods"]: # oldest to newest
-                    days = (p_end - p_start).days + 1
-                    char = char_map.get(p_level, "⚪")
-                    # Scale: 1 character = 2 days
-                    scaled_length = max(1, days // 2)
-                    timeline_chars += char * scaled_length
+    report.append("\n■ 증감 (전일 대비)")
+    all_provs = set(today_prov.keys()) | set(yest_prov.keys())
+    for p in sorted(all_provs):
+        diff = today_prov.get(p, 0) - yest_prov.get(p, 0)
+        if diff > 0:
+            report.append(f" - {p}: {diff}곳 증가 🔺")
+        elif diff < 0:
+            report.append(f" - {p}: {abs(diff)}곳 감소 🔽")
+        else:
+            report.append(f" - {p}: 변동 없음 (-)")
 
-                f.write(f"    [시각화] {timeline_chars}\n")
+    report.append("\n" + "="*58 + "\n")
 
-                reversed_periods = r_data["periods"][::-1]
-                for p_start, p_end, p_level in reversed_periods:
-                    days = (p_end - p_start).days + 1
-                    start_str = p_start.strftime("%Y-%m-%d")
-                    end_str = p_end.strftime("%Y-%m-%d")
-                    f.write(f"    - {start_str} ~ {end_str} ({days:2d}일): {p_level}\n")
-            f.write("\n")
+    report.append("[ 3페이지: 추세 분석 ]\n")
 
-    print("보고서 생성이 완료되었습니다: report.txt")
+    def get_trend_str(old_dict, new_dict):
+        diff = len(new_dict) - len(old_dict)
+        if diff > 0:
+            return f"가뭄 지역 {diff}곳 증가 (악화)"
+        elif diff < 0:
+            return f"가뭄 지역 {abs(diff)}곳 감소 (호전)"
+        else:
+            return "변동 없음"
+
+    report.append("■ 1일 추세 (전일 대비)")
+    report.append(f" - {get_trend_str(yest_regions, today_regions)}")
+
+    report.append("\n■ 7일 추세 (7일 전 대비)")
+    report.append(f" - {get_trend_str(data_by_period['7days'], today_regions)}")
+
+    report.append("\n■ 30일 추세 (30일 전 대비)")
+    report.append(f" - {get_trend_str(data_by_period['30days'], today_regions)}")
+
+    report.append("\n■ 지속일수 상위지역 (Top 10)")
+    sorted_durations = sorted(durations.items(), key=lambda x: -x[1])
+    for i, (r, d) in enumerate(sorted_durations[:10]):
+        lvl = today_regions[r]
+        report.append(f" {i+1}. {r}: {d}일 지속 (현재: {lvl})")
+
+    with open("report.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(report))
+
+    print("Report written to report.txt")
 
 if __name__ == "__main__":
     main()
